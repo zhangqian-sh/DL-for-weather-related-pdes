@@ -18,7 +18,7 @@ class PINNModel(tf.keras.Model):
         hidden_layers = [
             Dense(
                 layer,
-                activation="tanh",
+                activation=Lambda(lambda x: tf.sin(x)),
                 kernel_initializer="glorot_normal",
             )
             for layer in layers[1:-1]
@@ -104,33 +104,32 @@ class PINN_Euler(PINNModel):
     ) -> None:
         super().__init__(layers)
         self.gamma = gamma
-        self.lambda_eqn, self.lambda_ic = weight
+        self.lambda_eqn, self.lambda_ic, self.lambda_bc = weight
         self.optimizer = Adam()
-        self.epsilon = 1e-10
+        self.epsilon = 1e-6
 
-    # @tf.function
+    @tf.function
     def compute_Euler_eqn(self, t, x, y):
         """
-        output: [rho, rho*u, rho*v, E]
+        output: [rho, u, v, p]
         E = 0.5*rho*(u^2+v^2)+rho*e
         p = (gamma - 1)*rho*e
         """
         with tf.GradientTape(persistent=True) as tape:
             tape.watch([t, x, y])
-            ruve = self.call(t, x, y)
-            rho, rho_u, rho_v, E = (
-                ruve[:, 0:1],
-                ruve[:, 1:2],
-                ruve[:, 2:3],
-                ruve[:, 3:4],
+            ruvp = self.call(t, x, y)
+            rho, u, v, p = (
+                ruvp[:, 0:1],
+                ruvp[:, 1:2],
+                ruvp[:, 2:3],
+                ruvp[:, 3:4],
             )
             # calculate intermediate variables
-            u, v = rho_u / (rho + self.epsilon), rho_v / (rho + self.epsilon)
-            rho_u2, rho_v2 = rho_u * u, rho_v * v
-            p = (self.gamma - 1) * (E - 0.5 * (rho_u2 + rho_v2))
-            u1, f1, g1 = rho, rho_u, rho_v
-            u2, f2, g2 = rho_u, rho_u2 + p, rho * u * v
-            u3, f3, g3 = rho_v, rho * u * v, rho_v2 + p
+            rho_e = p / (self.gamma - 1)
+            E = 0.5 * rho * (u ** 2 + v ** 2) + rho_e
+            u1, f1, g1 = rho, rho * u, rho * v
+            u2, f2, g2 = rho * u, rho * u ** 2 + p, rho * u * v
+            u3, f3, g3 = rho * v, rho * u * v, rho * v ** 2 + p
             u4, f4, g4 = E, (E + p) * u, (E + p) * v
         # calculate gradients
         u1_t = tape.gradient(u1, t)
@@ -145,14 +144,6 @@ class PINN_Euler(PINNModel):
         u4_t = tape.gradient(u4, t)
         f4_x = tape.gradient(f4, x)
         g4_y = tape.gradient(g4, y)
-        print("eqn1")
-        print(u1_t, f1_x, g1_y)
-        print("eqn2")
-        print(u2_t, f2_x, g2_y)
-        print("eqn3")
-        print(u3_t, f3_x, g3_y)
-        print("eqn4")
-        print(u4_t, f4_x, g4_y)
         del tape
         eq1 = u1_t + f1_x + g1_y
         eq2 = u2_t + f2_x + g2_y
@@ -160,29 +151,46 @@ class PINN_Euler(PINNModel):
         eq4 = u4_t + f4_x + g4_y
         return eq1, eq2, eq3, eq4
 
-    # @tf.function
+    @tf.function
     def predict_ruvp(self, t, x, y):
-        ruve = self.call(t, x, y)
-        rho, rho_u, rho_v, E = ruve[:, 0:1], ruve[:, 1:2], ruve[:, 2:3], ruve[:, 3:4]
-        # calculate intermediate variables
-        u, v = rho_u / (rho + self.epsilon), rho_v / (rho + self.epsilon)
-        rho_u2, rho_v2 = rho_u * u, rho_v * v
-        p = (self.gamma - 1) * (E - 0.5 * (rho_u2 + rho_v2))
+        ruvp = self.call(t, x, y)
+        rho, u, v, p = ruvp[:, 0:1], ruvp[:, 1:2], ruvp[:, 2:3], ruvp[:, 3:4]
         return rho, u, v, p
 
-    # @tf.function
-    def train_step(self, X_res, X_ic):
+    @tf.function
+    def train_step(self, X_res, X_ic, X_bc):
         """
         TODO
         train for a single batch
         X_res: [t_res, x_res, y_res]
         X_ic: [t_res, x_res, y_res, nx_res, ny_res, u_res, v_res]
+        X_bc: [X_lr, X_du]
+        X_lr: [t_lr, x_l, y_l, t_lr, x_r, y_r]
+        X_du: [t_du, x_d, y_d, t_du, x_u, y_u]
         return: loss, loss_supervised, loss_eqn_momentum_x, loss_eqn_momentum_y, loss_eqn_mass
         """
         # load data
         t_res, x_res, y_res = X_res[:, 0:1], X_res[:, 1:2], X_res[:, 2:3]
         t_ic, x_ic, y_ic = X_ic[:, 0:1], X_ic[:, 1:2], X_ic[:, 2:3]
         rho, u, v, p = X_ic[:, 3:4], X_ic[:, 4:5], X_ic[:, 5:6], X_ic[:, 6:7]
+        # load bc
+        X_lr, X_du = X_bc
+        t_lr, x_l, y_l, t_lr, x_r, y_r = (
+            X_lr[:, 0:1],
+            X_lr[:, 1:2],
+            X_lr[:, 2:3],
+            X_lr[:, 3:4],
+            X_lr[:, 4:5],
+            X_lr[:, 5:6],
+        )
+        t_du, x_d, y_d, t_du, x_u, y_u = (
+            X_du[:, 0:1],
+            X_du[:, 1:2],
+            X_du[:, 2:3],
+            X_du[:, 3:4],
+            X_du[:, 4:5],
+            X_du[:, 5:6],
+        )
 
         # take gradient and BP
         with tf.GradientTape() as tape:
@@ -197,9 +205,6 @@ class PINN_Euler(PINNModel):
             loss_eqn_momentum_x = tf.math.reduce_mean(eqn_momentum_x ** 2)
             loss_eqn_momentum_y = tf.math.reduce_mean(eqn_momentum_y ** 2)
             loss_eqn_energy = tf.math.reduce_mean(eqn_energy ** 2)
-            # print(
-            #     loss_eqn_mass, loss_eqn_momentum_x, loss_eqn_momentum_y, loss_eqn_energy
-            # )
             loss_Euler = (
                 loss_eqn_mass
                 + loss_eqn_momentum_x
@@ -214,11 +219,30 @@ class PINN_Euler(PINNModel):
                 + (v_pred - v) ** 2
                 + (p_pred - p) ** 2
             )
+            # periodic bpundary condition
+            rho_l, u_l, v_l, p_l = self.predict_ruvp(t_lr, x_l, y_l)
+            rho_r, u_r, v_r, p_r = self.predict_ruvp(t_lr, x_r, y_r)
+            rho_d, u_d, v_d, p_d = self.predict_ruvp(t_du, x_d, y_d)
+            rho_u, u_u, v_u, p_u = self.predict_ruvp(t_du, x_u, y_u)
+            loss_bc = tf.math.reduce_mean(
+                (rho_l - rho_r) ** 2
+                + (u_l - u_r) ** 2
+                + (v_l - v_r) ** 2
+                + (p_l - p_r) ** 2
+            ) + tf.math.reduce_mean(
+                (rho_d - rho_u) ** 2
+                + (u_d - u_u) ** 2
+                + (v_d - v_u) ** 2
+                + (p_d - p_u) ** 2
+            )
             # total loss
-            loss = +self.lambda_eqn * loss_Euler + self.lambda_ic * loss_ic
+            loss = (
+                self.lambda_eqn * loss_Euler
+                + self.lambda_ic * loss_ic
+                + self.lambda_bc * loss_bc
+            )
         gradients = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-        # print(gradients[0])
 
         return (
             loss,
@@ -227,4 +251,5 @@ class PINN_Euler(PINNModel):
             loss_eqn_momentum_y,
             loss_eqn_energy,
             loss_ic,
+            loss_bc,
         )

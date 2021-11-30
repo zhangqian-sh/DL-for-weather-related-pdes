@@ -1,5 +1,4 @@
 import numpy as np
-from numpy.core.fromnumeric import take
 import tensorflow as tf
 from tensorflow.keras.layers import Dense, Lambda, Input
 from tensorflow.keras.optimizers import Adam
@@ -9,14 +8,8 @@ from typing import List, Tuple
 
 class PINNModel(tf.keras.Model):
     # initialize the model
-    def __init__(
-        self,
-        layers: List[int],
-        bound: Tuple[float, float],
-    ) -> None:
+    def __init__(self, layers: List[int]) -> None:
         super(PINNModel, self).__init__()
-        # loading parameters
-        self.lower_bound, self.upper_bound = bound
         # set up network
         self.layers_list = layers
         self.net = self.create_network(layers)
@@ -25,7 +18,7 @@ class PINNModel(tf.keras.Model):
         hidden_layers = [
             Dense(
                 layer,
-                activation=Lambda(lambda x: tf.sin(x)),
+                activation="tanh",
                 kernel_initializer="glorot_normal",
             )
             for layer in layers[1:-1]
@@ -44,21 +37,14 @@ class PINNModel(tf.keras.Model):
     @tf.function
     def call(self, t, x, y):
         X = tf.concat([t, x, y], 1)
-        X = self.normalize(X)
         for layer in self.net:
             X = layer(X)
         return X
 
-    @tf.function
-    def normalize(self, x):
-        return 2 * (x - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1
-
 
 class PINN_NS(PINNModel):
-    def __init__(
-        self, layers: List[int], bound: Tuple[float, float], Reynold: float
-    ) -> None:
-        super().__init__(Reynold, layers, bound)
+    def __init__(self, layers: List[int], Reynold: float) -> None:
+        super().__init__(layers)
         self.Reynold = Reynold
         self.nu_v = 1 / self.Reynold
 
@@ -114,12 +100,15 @@ class PINN_NS(PINNModel):
 
 class PINN_Euler(PINNModel):
     def __init__(
-        self, layers: List[int], bound: Tuple[float, float], gamma: float
+        self, layers: List[int], gamma: float, weight: Tuple[float, float]
     ) -> None:
-        super().__init__(layers, bound)
+        super().__init__(layers)
         self.gamma = gamma
+        self.lambda_eqn, self.lambda_ic = weight
+        self.optimizer = Adam()
+        self.epsilon = 1e-10
 
-    @tf.function
+    # @tf.function
     def compute_Euler_eqn(self, t, x, y):
         """
         output: [rho, rho*u, rho*v, E]
@@ -129,28 +118,41 @@ class PINN_Euler(PINNModel):
         with tf.GradientTape(persistent=True) as tape:
             tape.watch([t, x, y])
             ruve = self.call(t, x, y)
-            rho, rho_u, rho_v, E = ruve[:, 0:1], ruve[:, 1:2], ruve[:, 2:3], ruve[:, 3:4]
+            rho, rho_u, rho_v, E = (
+                ruve[:, 0:1],
+                ruve[:, 1:2],
+                ruve[:, 2:3],
+                ruve[:, 3:4],
+            )
             # calculate intermediate variables
-            u, v = rho_u / rho, rho_v / rho
+            u, v = rho_u / (rho + self.epsilon), rho_v / (rho + self.epsilon)
             rho_u2, rho_v2 = rho_u * u, rho_v * v
             p = (self.gamma - 1) * (E - 0.5 * (rho_u2 + rho_v2))
             u1, f1, g1 = rho, rho_u, rho_v
             u2, f2, g2 = rho_u, rho_u2 + p, rho * u * v
             u3, f3, g3 = rho_v, rho * u * v, rho_v2 + p
             u4, f4, g4 = E, (E + p) * u, (E + p) * v
-            # calculate gradients
-            u1_t = tape.gradient(u1, t)
-            f1_x = tape.gradient(f1, x)
-            g1_y = tape.gradient(g1, y)
-            u2_t = tape.gradient(u2, t)
-            f2_x = tape.gradient(f2, x)
-            g2_y = tape.gradient(g2, y)
-            u3_t = tape.gradient(u3, t)
-            f3_x = tape.gradient(f3, x)
-            g3_y = tape.gradient(g3, y)
-            u4_t = tape.gradient(u4, t)
-            f4_x = tape.gradient(f4, x)
-            g4_y = tape.gradient(g4, y)
+        # calculate gradients
+        u1_t = tape.gradient(u1, t)
+        f1_x = tape.gradient(f1, x)
+        g1_y = tape.gradient(g1, y)
+        u2_t = tape.gradient(u2, t)
+        f2_x = tape.gradient(f2, x)
+        g2_y = tape.gradient(g2, y)
+        u3_t = tape.gradient(u3, t)
+        f3_x = tape.gradient(f3, x)
+        g3_y = tape.gradient(g3, y)
+        u4_t = tape.gradient(u4, t)
+        f4_x = tape.gradient(f4, x)
+        g4_y = tape.gradient(g4, y)
+        print("eqn1")
+        print(u1_t, f1_x, g1_y)
+        print("eqn2")
+        print(u2_t, f2_x, g2_y)
+        print("eqn3")
+        print(u3_t, f3_x, g3_y)
+        print("eqn4")
+        print(u4_t, f4_x, g4_y)
         del tape
         eq1 = u1_t + f1_x + g1_y
         eq2 = u2_t + f2_x + g2_y
@@ -158,14 +160,71 @@ class PINN_Euler(PINNModel):
         eq4 = u4_t + f4_x + g4_y
         return eq1, eq2, eq3, eq4
 
-    # evaluation
-    @tf.function
-    def predict_ruve(self, t, x, y) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    # @tf.function
+    def predict_ruvp(self, t, x, y):
         ruve = self.call(t, x, y)
         rho, rho_u, rho_v, E = ruve[:, 0:1], ruve[:, 1:2], ruve[:, 2:3], ruve[:, 3:4]
         # calculate intermediate variables
-        u, v = rho_u / rho, rho_v / rho
+        u, v = rho_u / (rho + self.epsilon), rho_v / (rho + self.epsilon)
         rho_u2, rho_v2 = rho_u * u, rho_v * v
         p = (self.gamma - 1) * (E - 0.5 * (rho_u2 + rho_v2))
-
         return rho, u, v, p
+
+    # @tf.function
+    def train_step(self, X_res, X_ic):
+        """
+        TODO
+        train for a single batch
+        X_res: [t_res, x_res, y_res]
+        X_ic: [t_res, x_res, y_res, nx_res, ny_res, u_res, v_res]
+        return: loss, loss_supervised, loss_eqn_momentum_x, loss_eqn_momentum_y, loss_eqn_mass
+        """
+        # load data
+        t_res, x_res, y_res = X_res[:, 0:1], X_res[:, 1:2], X_res[:, 2:3]
+        t_ic, x_ic, y_ic = X_ic[:, 0:1], X_ic[:, 1:2], X_ic[:, 2:3]
+        rho, u, v, p = X_ic[:, 3:4], X_ic[:, 4:5], X_ic[:, 5:6], X_ic[:, 6:7]
+
+        # take gradient and BP
+        with tf.GradientTape() as tape:
+            # Euler loss
+            (
+                eqn_mass,
+                eqn_momentum_x,
+                eqn_momentum_y,
+                eqn_energy,
+            ) = self.compute_Euler_eqn(t_res, x_res, y_res)
+            loss_eqn_mass = tf.math.reduce_mean(eqn_mass ** 2)
+            loss_eqn_momentum_x = tf.math.reduce_mean(eqn_momentum_x ** 2)
+            loss_eqn_momentum_y = tf.math.reduce_mean(eqn_momentum_y ** 2)
+            loss_eqn_energy = tf.math.reduce_mean(eqn_energy ** 2)
+            # print(
+            #     loss_eqn_mass, loss_eqn_momentum_x, loss_eqn_momentum_y, loss_eqn_energy
+            # )
+            loss_Euler = (
+                loss_eqn_mass
+                + loss_eqn_momentum_x
+                + loss_eqn_momentum_y
+                + loss_eqn_energy
+            )
+            # initial condition loss
+            rho_pred, u_pred, v_pred, p_pred = self.predict_ruvp(t_ic, x_ic, y_ic)
+            loss_ic = tf.math.reduce_mean(
+                (rho_pred - rho) ** 2
+                + (u_pred - u) ** 2
+                + (v_pred - v) ** 2
+                + (p_pred - p) ** 2
+            )
+            # total loss
+            loss = +self.lambda_eqn * loss_Euler + self.lambda_ic * loss_ic
+        gradients = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
+        # print(gradients[0])
+
+        return (
+            loss,
+            loss_eqn_mass,
+            loss_eqn_momentum_x,
+            loss_eqn_momentum_y,
+            loss_eqn_energy,
+            loss_ic,
+        )

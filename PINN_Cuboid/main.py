@@ -3,38 +3,43 @@ from typing import Tuple
 import numpy as np
 import tensorflow as tf
 import tensorflow_addons as tfa
-from tensorflow.keras.optimizers import Adam
 
 import scipy.io as sio
 import time
 import os
 
-from PINN_model import PINN_Euler, evaluate_and_save
-from generate_bc import boundary_condition
-from utils import InverseTimeDecay, get_batch_tensor
+from model.PINN_Euler import PINN_Euler, evaluate_and_save
+
+# from model.PINN_NS import PINN_NS, evaluate_and_save
+from utils import get_batch_tensor, boundary_condition
 
 # %% set parameters
+Mc, Lc, Tc = 1e6, 100, 1
 gamma = 1.4
 rho_0 = 1.225
-u_0, v_0 = 100, 0  # 100, 0
-p_0 = 1.013 * 10
-u_boundary = 100
+nv = 1.81e-5 / rho_0
+nv_c = nv / (Lc ** 2)
+Reynold = 1 / nv_c
+print(nv_c)
+u_0, v_0 = 0.1, 0  # 100, 0
+p_0 = 10  # 1.013 * 10
+boundarys = (rho_0, u_0, v_0, p_0)
 
-scale = (1, 100, 100, 10)
+scale = (1, 1, 1, 1)
 
 # geometry
-x_l, x_r = 0, 2
-y_d, y_u = 0, 2
-xc_l, xc_r = 0.75, 1.25
-yc_d, yc_u = 0.75, 1.25
+x_l, x_r = 0, 1
+y_d, y_u = 0, 0.3
+xc_l, xc_r = 0.2, 0.26
+yc_d, yc_u = 0.12, 0.18
 
 T = 1
-N_x, N_y, N_t = 100, 100, 100
+N_x, N_y, N_t = 100, 30, 100
 
 N_res = 100000
 N_ic = 1000
 N_bc = 10000
-batch_size = 100000
+batch_size = 10000
 num_epochs = 20000
 
 decay_step_scale = 5000
@@ -43,9 +48,9 @@ num_layer = 4
 num_node = 100
 layers = [3] + num_layer * [num_node] + [4]
 
-lambda_eqn, lambda_ic, lambda_bc = 10, 100, 100
+lambda_eqn, lambda_ic, lambda_bc = 1, 100, 1
 
-job_name = "cuboid"
+job_name = "cuboid_nopenetrate_simple"
 save_path = f"../Results/PINN_Euler/{job_name}/"
 os.makedirs(save_path, exist_ok=True)
 
@@ -131,8 +136,17 @@ X_final = np.stack((t, x, y), 1)
 # %% define model and optimizer
 decay_step = decay_step_scale * N_res // batch_size
 
+# model = PINN_NS(
+#     layers, Reynold, boundarys, (lambda_eqn, lambda_ic, lambda_bc), decay_step
+# )
 model = PINN_Euler(
-    layers, gamma, scale, u_boundary, (lambda_eqn, lambda_ic, lambda_bc), decay_step
+    layers,
+    gamma,
+    scale,
+    boundarys,
+    1e-6,
+    (lambda_eqn, lambda_ic, lambda_bc),
+    decay_step,
 )
 model.dummy_model_for_summary().summary()
 
@@ -200,29 +214,44 @@ for epoch in range(1, num_epochs + 1):
         loss_eqn_momentum_y,
         loss_eqn_energy,
         loss_ic,
-        loss_bc,
+        loss_bc_inflow,
+        loss_bc_inner,
     ) = train(model, X_res, X_ic, (X_bc_outer, X_bc_inner))
-    loss_Euler = (
-        loss_eqn_mass
-        + loss_eqn_momentum_x
-        + loss_eqn_momentum_y
-        + loss_eqn_energy
+    loss_eqn = (
+        loss_eqn_mass + loss_eqn_momentum_x + loss_eqn_momentum_y + loss_eqn_energy
     )
     end_time = time.time()
 
     # visualize and log loss
-    optim_step = epoch * (N_res // batch_size)
-    lr = 0.001 / (1 + 0.5 * optim_step / decay_step)
-    print("-" * 50)
-    print(
-        f"Epoch: {epoch:d}, It: {optim_step:d}, Time: {end_time-start_time:.2f}s, Learning Rate: {lr:.1e}"
-    )
-    print(
-        f"Epoch: {epoch:d}, It: {optim_step:d}, Loss_sum: {loss:.3e}, Loss_Euler: {loss_Euler:.3e}, Loss_ic: {loss_ic:.3e}, Loss_bc: {loss_bc:.3e}"
-    )
-    print(
-        f"Epoch: {epoch:d}, It: {optim_step:d}, Loss_e_m: {loss_eqn_mass:.3e}, Loss_e_x: {loss_eqn_momentum_x:.3e}, Loss_e_y: {loss_eqn_momentum_y:.3e},Loss_e_E: {loss_eqn_energy:.3e}"
-    )
+    if epoch % 10 == 0:
+        optim_step = epoch * (N_res // batch_size)
+        lr = 0.001 / (1 + 0.5 * optim_step / decay_step)
+        # print("-" * 50)
+        # print(
+        #     f"Epoch: {epoch:d}, It: {optim_step:d}, Time: {end_time-start_time:.2f}s, Learning Rate: {lr:.1e}"
+        # )
+        # print(
+        #     f"Epoch: {epoch:d}, It: {optim_step:d}, Loss_sum: {loss:.3e}, Loss_NS: {loss_NS:.3e}, Loss_ic: {loss_ic:.3e}"
+        # )
+        # print(
+        #     f"Epoch: {epoch:d}, It: {optim_step:d}, Loss_bc: {loss_bc_inflow+loss_bc_inner:.3e}, Loss_bc_inflow: {loss_bc_inflow:.3e}, Loss_bc_inner: {loss_bc_inner:.3e}"
+        # )
+        # print(
+        #     f"Epoch: {epoch:d}, It: {optim_step:d}, Loss_e_m: {loss_eqn_mass:.3e}, Loss_e_x: {loss_eqn_momentum_x:.3e}, Loss_e_y: {loss_eqn_momentum_y:.3e}"
+        # )
+        print("-" * 50)
+        print(
+            f"Epoch: {epoch:d}, It: {optim_step:d}, Time: {end_time-start_time:.2f}s, Learning Rate: {lr:.1e}"
+        )
+        print(
+            f"Epoch: {epoch:d}, It: {optim_step:d}, Loss_sum: {loss:.3e}, Loss_Euler: {loss_eqn:.3e}, Loss_ic: {loss_ic:.3e}"
+        )
+        print(
+            f"Epoch: {epoch:d}, It: {optim_step:d}, Loss_bc: {loss_bc_inflow+loss_bc_inner:.3e}, Loss_bc_inflow: {loss_bc_inflow:.3e}, Loss_bc_inner: {loss_bc_inner:.3e}"
+        )
+        print(
+            f"Epoch: {epoch:d}, It: {optim_step:d}, Loss_e_m: {loss_eqn_mass:.3e}, Loss_e_x: {loss_eqn_momentum_x:.3e}, Loss_e_y: {loss_eqn_momentum_y:.3e}, Loss_e_E:{loss_eqn_energy:.3e}"
+        )
 
     log_loss.append(
         [
@@ -232,10 +261,11 @@ for epoch in range(1, num_epochs + 1):
             loss_eqn_momentum_y,
             loss_eqn_energy,
             loss_ic,
-            loss_bc,
+            loss_bc_inflow,
+            loss_bc_inner,
         ]
     )
 
-    if epoch % 1000 == 0:
+    if epoch % 500 == 0:
         save_file_path = save_path + f"PINN_results_{epoch}.mat"
         evaluate_and_save(model, X_final, mask, [N_y, N_x], log_loss, save_file_path)

@@ -40,17 +40,17 @@ N_res = 100000
 N_ic = 1000
 N_bc = 10000
 batch_size = 10000
-num_epochs = 20000
+num_epochs = 100000
 
 decay_step_scale = 5000
 
-num_layer = 4
-num_node = 100
+num_layer = 8
+num_node = 150
 layers = [3] + num_layer * [num_node] + [4]
 
 lambda_eqn, lambda_ic, lambda_bc = 1, 100, 1
 
-job_name = "cuboid_nopenetrate_simple"
+job_name = "cuboid_largemodel_long"
 save_path = f"../Results/PINN_Euler/{job_name}/"
 os.makedirs(save_path, exist_ok=True)
 
@@ -266,6 +266,6 @@ for epoch in range(1, num_epochs + 1):
         ]
     )
 
-    if epoch % 500 == 0:
+    if epoch % 1000 == 0:
         save_file_path = save_path + f"PINN_results_{epoch}.mat"
         evaluate_and_save(model, X_final, mask, [N_y, N_x], log_loss, save_file_path)

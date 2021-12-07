@@ -24,11 +24,20 @@ gamma = 1.4
 # T = 1
 # N_x, N_y, N_t = 200, 200, 100
 
+# example 2
+x_l, x_r = 0, 10
+y_d, y_u = 0, 10
+x_c, y_c = 5, 5
+T = 1
+epsilon = 5 / (2 * np.pi)
+alpha = 1 / 2
+N_x, N_y, N_t = 1000, 1000, 100
+
 # example 4
-x_l, x_r = -1, 1
-y_d, y_u = -1, 1
-T = 0.15
-N_x, N_y, N_t = 200, 200, 150
+# x_l, x_r = -1, 1
+# y_d, y_u = -1, 1
+# T = 0.15
+# N_x, N_y, N_t = 200, 200, 150
 
 N_res = 100000
 N_ic = 1000
@@ -42,15 +51,27 @@ num_layer = 4
 num_node = 100
 layers = [3] + num_layer * [num_node] + [4]
 
-lambda_eqn, lambda_ic, lambda_bc = 1, 100, 0
+lambda_eqn, lambda_ic, lambda_bc = 1, 100, 1
 
-job_name = "example_4"
+job_name = "example_2"
 save_path = f"../Results/PINN_Euler/{job_name}/"
 os.makedirs(save_path, exist_ok=True)
 
 
+# example 2 exact solution at t=0
+def initial_exact_solution(x, y):
+    r = np.sqrt((x - x_c) ** 2 + (y - y_c) ** 2)
+    phi = epsilon * np.exp(alpha * (1 - r ** 2))
+    Txy = 1 - (gamma - 1) / (2 * gamma) * phi ** 2
+    rho = Txy ** (1 / (gamma - 1))
+    u = 1 - (y - y_c) * phi
+    v = 1 + (x - x_c) * phi
+    p = Txy ** (gamma / (gamma - 1))
+    return rho, u, v, p
+
+
 def intialize(x: np.ndarray, y: np.ndarray):
-    L_x, L_y = x.shape
+    L_y, L_x = x.shape
     rho_grid, u_grid, v_grid, p_grid = (
         np.zeros_like(x),
         np.zeros_like(x),
@@ -60,10 +81,21 @@ def intialize(x: np.ndarray, y: np.ndarray):
     # ex1
     # rho_grid = 1 + 0.5 * np.sin(x + y)
     # ex4
-    rho_grid[x < 0], rho_grid[x >= 0] = rho_l, rho_r
-    u_grid[x < 0], u_grid[x >= 0] = u_l, u_r
-    v_grid[x < 0], v_grid[x >= 0] = v_l, v_r
-    p_grid[x < 0], p_grid[x >= 0] = p_l, p_r
+    # rho_grid[x < 0], rho_grid[x >= 0] = rho_l, rho_r
+    # u_grid[x < 0], u_grid[x >= 0] = u_l, u_r
+    # v_grid[x < 0], v_grid[x >= 0] = v_l, v_r
+    # p_grid[x < 0], p_grid[x >= 0] = p_l, p_r
+    # ex2
+    # for i in range(L_y):
+    #     for j in range(L_x):
+    #         (
+    #             rho_grid[i, j],
+    #             u_grid[i, j],
+    #             v_grid[i, j],
+    #             p_grid[i, j],
+    #         ) = initial_exact_solution(x[i, j], y[i, j])
+    rho_grid, u_grid, v_grid, p_grid = initial_exact_solution(x, y)
+
     return rho_grid, u_grid, v_grid, p_grid
 
 
@@ -91,12 +123,29 @@ ic_idx = np.random.choice(len(X_ic), size=N_ic, replace=False)
 X_ic = X_ic[ic_idx]
 
 # Boundary Condition
+def boundary_value(X: np.ndarray):
+    t, x, y = X.T
+    rho, u, v, p = (
+        np.zeros_like(t),
+        np.zeros_like(t),
+        np.zeros_like(t),
+        np.zeros_like(t),
+    )
+    # for i in range(len(t)):
+    #     rho[i], u[i], v[i], p[i] = initial_exact_solution(x[i] - t[i], y[i] - t[i])
+    rho, u, v, p = initial_exact_solution(x - t, y - t)
+    Y = np.stack((rho, u, v, p), 1)
+    return Y
+
+
 left_points = np.stack((np.ones(N_y) * x_l, np.linspace(y_d, y_u, N_y)), 1)
 right_points = np.stack((np.ones(N_y) * x_r, np.linspace(y_d, y_u, N_y)), 1)
 t_lr = np.repeat(np.linspace(0, T, N_t), N_y).reshape(-1, 1)
 X_left = np.hstack((t_lr, np.vstack([left_points for _ in range(N_t)])))
+Y_left = boundary_value(X_left)
 X_right = np.hstack((t_lr, np.vstack([right_points for _ in range(N_t)])))
-X_lr = np.concatenate((X_left, X_right), 1)
+Y_right = boundary_value(X_right)
+X_lr = np.concatenate((X_left, Y_left, X_right, Y_right), 1)
 lr_idx = np.random.choice(len(X_lr), size=N_bc, replace=False)
 X_lr = X_lr[lr_idx]
 
@@ -104,11 +153,12 @@ down_points = np.stack((np.linspace(x_l, x_r, N_x), np.ones(N_x) * y_d), 1)
 up_points = np.stack((np.linspace(x_l, x_r, N_x), np.ones(N_x) * y_u), 1)
 t_du = np.repeat(np.linspace(0, T, N_t), N_x).reshape(-1, 1)
 X_down = np.hstack((t_du, np.vstack([down_points for _ in range(N_t)])))
+Y_down = boundary_value(X_down)
 X_up = np.hstack((t_du, np.vstack([up_points for _ in range(N_t)])))
-X_du = np.concatenate((X_down, X_up), 1)
+Y_up = boundary_value(X_up)
+X_du = np.concatenate((X_down, Y_down, X_up, Y_up), 1)
 ud_idx = np.random.choice(len(X_du), size=N_bc, replace=False)
 X_du = X_du[ud_idx]
-
 
 X_bc = (X_lr, X_du)
 

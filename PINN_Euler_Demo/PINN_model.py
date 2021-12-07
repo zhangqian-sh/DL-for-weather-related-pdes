@@ -165,8 +165,10 @@ class PINN_Euler(PINNModel):
         X_res: [t_res, x_res, y_res]
         X_ic: [t_res, x_res, y_res, nx_res, ny_res, u_res, v_res]
         X_bc: [X_lr, X_du]
-        X_lr: [t_lr, x_l, y_l, t_lr, x_r, y_r]
-        X_du: [t_du, x_d, y_d, t_du, x_u, y_u]
+        # X_lr: [t_lr, x_l, y_l, t_lr, x_r, y_r]
+        # X_du: [t_du, x_d, y_d, t_du, x_u, y_u]
+        X_lr: [t_lr, x_l, y_l, rho_l, u_l, v_l, p_l, t_lr, x_r, y_r, rho_r, u_r, v_r, p_r]
+        X_du: [t_du, x_d, y_d, rho_d, u_d, v_d, p_d, t_du, x_u, y_u, rho_u, u_u, v_u, p_u]
         return: loss, loss_supervised, loss_eqn_momentum_x, loss_eqn_momentum_y, loss_eqn_mass
         """
         # load data
@@ -175,22 +177,22 @@ class PINN_Euler(PINNModel):
         rho, u, v, p = X_ic[:, 3:4], X_ic[:, 4:5], X_ic[:, 5:6], X_ic[:, 6:7]
         # load bc
         X_lr, X_du = X_bc
-        t_lr, x_l, y_l, t_lr, x_r, y_r = (
-            X_lr[:, 0:1],
-            X_lr[:, 1:2],
-            X_lr[:, 2:3],
-            X_lr[:, 3:4],
-            X_lr[:, 4:5],
-            X_lr[:, 5:6],
-        )
-        t_du, x_d, y_d, t_du, x_u, y_u = (
-            X_du[:, 0:1],
-            X_du[:, 1:2],
-            X_du[:, 2:3],
-            X_du[:, 3:4],
-            X_du[:, 4:5],
-            X_du[:, 5:6],
-        )
+
+        def unpack_bc(X: np.ndarray):
+            return (
+                X[:, 0:1],
+                X[:, 1:2],
+                X[:, 2:3],
+                X[:, 3:4],
+                X[:, 4:5],
+                X[:, 5:6],
+                X[:, 6:7],
+            )
+
+        t_lr, x_l, y_l, rho_l, u_l, v_l, p_l = unpack_bc(X_lr[:, :7])
+        t_lr, x_r, y_r, rho_r, u_r, v_r, p_r = unpack_bc(X_lr[:, 7:])
+        t_du, x_d, y_d, rho_d, u_d, v_d, p_d = unpack_bc(X_du[:, :7])
+        t_du, x_u, y_u, rho_u, u_u, v_u, p_u = unpack_bc(X_du[:, 7:])
 
         # take gradient and BP
         with tf.GradientTape() as tape:
@@ -220,20 +222,47 @@ class PINN_Euler(PINNModel):
                 + (p_pred - p) ** 2
             )
             # periodic bpundary condition
-            rho_l, u_l, v_l, p_l = self.predict_ruvp(t_lr, x_l, y_l)
-            rho_r, u_r, v_r, p_r = self.predict_ruvp(t_lr, x_r, y_r)
-            rho_d, u_d, v_d, p_d = self.predict_ruvp(t_du, x_d, y_d)
-            rho_u, u_u, v_u, p_u = self.predict_ruvp(t_du, x_u, y_u)
-            loss_bc = tf.math.reduce_mean(
-                (rho_l - rho_r) ** 2
-                + (u_l - u_r) ** 2
-                + (v_l - v_r) ** 2
-                + (p_l - p_r) ** 2
-            ) + tf.math.reduce_mean(
-                (rho_d - rho_u) ** 2
-                + (u_d - u_u) ** 2
-                + (v_d - v_u) ** 2
-                + (p_d - p_u) ** 2
+            rho_l_pred, u_l_pred, v_l_pred, p_l_pred = self.predict_ruvp(t_lr, x_l, y_l)
+            rho_r_pred, u_r_pred, v_r_pred, p_r_pred = self.predict_ruvp(t_lr, x_r, y_r)
+            rho_d_pred, u_d_pred, v_d_pred, p_d_pred = self.predict_ruvp(t_du, x_d, y_d)
+            rho_u_pred, u_u_pred, v_u_pred, p_u_pred = self.predict_ruvp(t_du, x_u, y_u)
+
+            # loss_bc = tf.math.reduce_mean(
+            #     (rho_l - rho_r) ** 2
+            #     + (u_l - u_r) ** 2
+            #     + (v_l - v_r) ** 2
+            #     + (p_l - p_r) ** 2
+            # ) + tf.math.reduce_mean(
+            #     (rho_d - rho_u) ** 2
+            #     + (u_d - u_u) ** 2
+            #     + (v_d - v_u) ** 2
+            #     + (p_d - p_u) ** 2
+            # )
+            loss_bc = (
+                tf.math.reduce_mean(
+                    (rho_l_pred - rho_l) ** 2
+                    + (u_l_pred - u_l) ** 2
+                    + (v_l_pred - v_l) ** 2
+                    + (p_l_pred - p_l) ** 2
+                )
+                + tf.math.reduce_mean(
+                    (rho_r_pred - rho_r) ** 2
+                    + (u_r_pred - u_r) ** 2
+                    + (v_r_pred - v_r) ** 2
+                    + (p_r_pred - p_r) ** 2
+                )
+                + tf.math.reduce_mean(
+                    (rho_d_pred - rho_d) ** 2
+                    + (u_d_pred - u_d) ** 2
+                    + (v_d_pred - v_d) ** 2
+                    + (p_d_pred - p_d) ** 2
+                )
+                + tf.math.reduce_mean(
+                    (rho_u_pred - rho_u) ** 2
+                    + (u_u_pred - u_u) ** 2
+                    + (v_u_pred - v_u) ** 2
+                    + (p_u_pred - p_u) ** 2
+                )
             )
             # total loss
             loss = (

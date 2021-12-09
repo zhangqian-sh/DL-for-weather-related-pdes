@@ -33,14 +33,14 @@ y_d, y_u = 0, 0.3
 xc_l, xc_r = 0.2, 0.26
 yc_d, yc_u = 0.12, 0.18
 
-T = 1
-N_x, N_y, N_t = 100, 30, 100
+T = 20
+N_x, N_y, N_t = 100, 30, 2000
 
-N_res = 100000
+N_res = 1000000
 N_ic = 1000
 N_bc = 10000
-batch_size = 10000
-num_epochs = 100000
+batch_size = 20000
+num_epochs = 50000
 
 decay_step_scale = 5000
 
@@ -50,7 +50,7 @@ layers = [3] + num_layer * [num_node] + [4]
 
 lambda_eqn, lambda_ic, lambda_bc = 1, 100, 1
 
-job_name = "cuboid_largemodel_long"
+job_name = "cuboid_largemodel_longsimulation"
 save_path = f"../Results/PINN_Euler/{job_name}/"
 os.makedirs(save_path, exist_ok=True)
 
